@@ -14,6 +14,9 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.AspNetCore.Http;
 using System.Threading;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.HealthChecks;
+using Microsoft.eShopOnContainers.BuildingBlocks.Resilience.Http;
+using Microsoft.eShopOnContainers.WebMVC.Infrastructure;
 
 namespace Microsoft.eShopOnContainers.WebMVC
 {
@@ -41,16 +44,43 @@ namespace Microsoft.eShopOnContainers.WebMVC
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
+            services.AddDataProtection(opts =>
+            {
+                opts.ApplicationDiscriminator = "eshop.webmvc";
+            });
+
             services.AddMvc();
             services.Configure<AppSettings>(Configuration);
 
+            services.AddHealthChecks(checks =>
+            {
+                var minutes = 1;
+                if (int.TryParse(Configuration["HealthCheck:Timeout"], out var minutesParsed))
+                {
+                    minutes = minutesParsed;
+                }
+                checks.AddUrlCheck(Configuration["CatalogUrl"] + "/hc", TimeSpan.FromMinutes(minutes));
+                checks.AddUrlCheck(Configuration["OrderingUrl"] + "/hc", TimeSpan.FromMinutes(minutes));
+                checks.AddUrlCheck(Configuration["BasketUrl"] + "/hc", TimeSpan.FromMinutes(minutes));
+                checks.AddUrlCheck(Configuration["IdentityUrl"] + "/hc", TimeSpan.FromMinutes(minutes));
+            });
+
             // Add application services.
             services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
-
-            services.AddTransient<ICatalogService, CatalogService>(); 
-            services.AddTransient<IOrderingService, OrderingService>(); 
+            services.AddTransient<ICatalogService, CatalogService>();
+            services.AddTransient<IOrderingService, OrderingService>();
             services.AddTransient<IBasketService, BasketService>();
             services.AddTransient<IIdentityParser<ApplicationUser>, IdentityParser>();
+
+            if (Configuration.GetValue<string>("UseResilientHttp") == bool.TrueString)
+            {
+                services.AddSingleton<IResilientHttpClientFactory, ResilientHttpClientFactory>();
+                services.AddSingleton<IHttpClient, ResilientHttpClient>(sp => sp.GetService<IResilientHttpClientFactory>().CreateResilientHttpClient());
+            }
+            else
+            {
+                services.AddSingleton<IHttpClient, StandardHttpClient>();
+            }
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -88,20 +118,15 @@ namespace Microsoft.eShopOnContainers.WebMVC
                 AuthenticationScheme = "oidc",
                 SignInScheme = "Cookies",
                 Authority = identityUrl.ToString(),
-                PostLogoutRedirectUri = callBackUrl.ToString(), 
+                PostLogoutRedirectUri = callBackUrl.ToString(),
                 ClientId = "mvc",
                 ClientSecret = "secret",
-                ResponseType = "code id_token", 
+                ResponseType = "code id_token",
                 SaveTokens = true,
                 GetClaimsFromUserInfoEndpoint = true,
-                RequireHttpsMetadata = false, 
+                RequireHttpsMetadata = false,
+                Scope = { "openid", "profile", "orders", "basket" }
             };
-
-            oidcOptions.Scope.Clear();
-            oidcOptions.Scope.Add("openid");
-            oidcOptions.Scope.Add("profile");
-            oidcOptions.Scope.Add("orders");
-            oidcOptions.Scope.Add("basket");
 
             //Wait untill identity service is ready on compose. 
             app.UseOpenIdConnectAuthentication(oidcOptions);

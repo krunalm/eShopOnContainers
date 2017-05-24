@@ -7,7 +7,14 @@ projectList=(
     "../src/Services/Identity/Identity.API"
     "../src/Web/WebMVC"
     "../src/Web/WebSPA"
+    "../src/Web/WebStatus"
 )
+
+
+pushd $(pwd)/../src/Web/WebSPA
+npm install
+npm rebuild node-sass
+popd 
 
 for project in "${projectList[@]}"
 do

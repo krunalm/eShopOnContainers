@@ -2,6 +2,7 @@
 using MediatR;
 using System.Collections.Generic;
 using System.Runtime.Serialization;
+using System.Collections;
 
 namespace Microsoft.eShopOnContainers.Services.Ordering.API.Application.Commands
 {
@@ -52,22 +53,24 @@ namespace Microsoft.eShopOnContainers.Services.Ordering.API.Application.Commands
         public int CardTypeId { get; private set; }
 
         [DataMember]
-        public IEnumerable<OrderItemDTO> OrderItems => _orderItems;
+        public int PaymentId { get; private set; }
 
-        public void AddOrderItem(OrderItemDTO item)
-        {
-            _orderItems.Add(item);
-        }
+        [DataMember]
+        public int BuyerId { get; private set; }
+
+        [DataMember]
+        public IEnumerable<OrderItemDTO> OrderItems => _orderItems;
 
         public CreateOrderCommand()
         {
             _orderItems = new List<OrderItemDTO>();
         }
 
-        public CreateOrderCommand(string city, string street, string state, string country, string zipcode,
+        public CreateOrderCommand(List<OrderItemDTO> orderItems, string city, string street, string state, string country, string zipcode,
             string cardNumber, string cardHolderName, DateTime cardExpiration,
-            string cardSecurityNumber, int cardTypeId) : this()
+            string cardSecurityNumber, int cardTypeId, int paymentId, int buyerId) : this()
         {
+            _orderItems = orderItems;
             City = city;
             Street = street;
             State = state;
@@ -75,11 +78,13 @@ namespace Microsoft.eShopOnContainers.Services.Ordering.API.Application.Commands
             ZipCode = zipcode;
             CardNumber = cardNumber;
             CardHolderName = cardHolderName;
+            CardExpiration = cardExpiration;
             CardSecurityNumber = cardSecurityNumber;
             CardTypeId = cardTypeId;
             CardExpiration = cardExpiration;
+            PaymentId = paymentId;
+            BuyerId = buyerId;
         }
-
 
         public class OrderItemDTO
         {

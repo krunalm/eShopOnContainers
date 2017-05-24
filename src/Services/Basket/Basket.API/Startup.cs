@@ -1,18 +1,26 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
+﻿using Basket.API.Infrastructure.Filters;
+using Basket.API.IntegrationEvents.EventHandling;
+using Basket.API.IntegrationEvents.Events;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.eShopOnContainers.BuildingBlocks.EventBus;
+using Microsoft.eShopOnContainers.BuildingBlocks.EventBus.Abstractions;
+using Microsoft.eShopOnContainers.BuildingBlocks.EventBusRabbitMQ;
+using Microsoft.eShopOnContainers.Services.Basket.API.Auth.Server;
+using Microsoft.eShopOnContainers.Services.Basket.API.IntegrationEvents.EventHandling;
+using Microsoft.eShopOnContainers.Services.Basket.API.IntegrationEvents.Events;
+using Microsoft.eShopOnContainers.Services.Basket.API.Model;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.HealthChecks;
 using Microsoft.Extensions.Logging;
-using Microsoft.eShopOnContainers.Services.Basket.API.Model;
-using StackExchange.Redis;
 using Microsoft.Extensions.Options;
+using RabbitMQ.Client;
+using StackExchange.Redis;
+using System.Linq;
 using System.Net;
-using Swashbuckle.Swagger.Model;
-using Microsoft.eShopOnContainers.Services.Basket.API.Auth.Server;
+using System.Threading.Tasks;
+using System;
 
 namespace Microsoft.eShopOnContainers.Services.Basket.API
 {
@@ -33,8 +41,18 @@ namespace Microsoft.eShopOnContainers.Services.Basket.API
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
+
+            services.AddHealthChecks(checks =>
+            {
+                checks.AddValueTaskCheck("HTTP Endpoint", () => new ValueTask<IHealthCheckResult>(HealthCheckResult.Healthy("Ok")));
+            });
+
             // Add framework services.
-            services.AddMvc();
+            services.AddMvc(options =>
+            {
+                options.Filters.Add(typeof(HttpGlobalExceptionFilter));
+            }).AddControllersAsServices();
+
             services.Configure<BasketSettings>(Configuration);
 
             //By connecting here we are making sure that our service
@@ -43,17 +61,31 @@ namespace Microsoft.eShopOnContainers.Services.Basket.API
             //and then creating the connection it seems reasonable to move
             //that cost to startup instead of having the first request pay the
             //penalty.
-            services.AddSingleton<ConnectionMultiplexer>((sp) => {
-                var config = sp.GetRequiredService<IOptionsSnapshot<BasketSettings>>().Value;
-                var ips = Dns.GetHostAddressesAsync(config.ConnectionString).Result;
+            services.AddSingleton<ConnectionMultiplexer>(sp =>
+            {
+                var settings = sp.GetRequiredService<IOptions<BasketSettings>>().Value;
+                var ips = Dns.GetHostAddressesAsync(settings.ConnectionString).Result;
+
                 return ConnectionMultiplexer.Connect(ips.First().ToString());
             });
 
+
+            services.AddSingleton<IRabbitMQPersistentConnection>(sp =>
+            {
+                var settings = sp.GetRequiredService<IOptions<BasketSettings>>().Value;
+                var logger = sp.GetRequiredService<ILogger<DefaultRabbitMQPersistentConnection>>();
+                var factory = new ConnectionFactory()
+                {
+                    HostName = settings.EventBusConnection
+                };
+
+                return new DefaultRabbitMQPersistentConnection(factory, logger);
+            });
+
             services.AddSwaggerGen();
-            //var sch = new IdentitySecurityScheme();
+
             services.ConfigureSwaggerGen(options =>
             {
-                //options.AddSecurityDefinition("IdentityServer", sch);
                 options.OperationFilter<AuthorizationHeaderParameterOperationFilter>();
                 options.DescribeAllEnumsAsStrings();
                 options.SingleApiVersion(new Swashbuckle.Swagger.Model.Info()
@@ -76,6 +108,17 @@ namespace Microsoft.eShopOnContainers.Services.Basket.API
             });
 
             services.AddTransient<IBasketRepository, RedisBasketRepository>();
+            RegisterServiceBus(services);
+        }
+
+        private void RegisterServiceBus(IServiceCollection services)
+        {
+            services.AddSingleton<IEventBus, EventBusRabbitMQ>();
+            services.AddSingleton<IEventBusSubscriptionsManager, InMemoryEventBusSubscriptionsManager>();
+
+            services.AddTransient<ProductPriceChangedIntegrationEventHandler>();
+            services.AddTransient<OrderStartedIntegrationEventHandler>();
+
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -89,20 +132,43 @@ namespace Microsoft.eShopOnContainers.Services.Basket.API
             // Use frameworks
             app.UseCors("CorsPolicy");
 
-            var identityUrl = Configuration.GetValue<string>("IdentityUrl");
-
-            app.UseIdentityServerAuthentication(new IdentityServerAuthenticationOptions
-            {
-                Authority = identityUrl.ToString(),
-                ScopeName = "basket",
-                RequireHttpsMetadata = false
-            });
+            ConfigureAuth(app);
 
             app.UseMvcWithDefaultRoute();
 
             app.UseSwagger()
                 .UseSwaggerUi();
 
+            ConfigureEventBus(app);
+
+        }
+
+        protected virtual void ConfigureAuth(IApplicationBuilder app)
+        {
+            var identityUrl = Configuration.GetValue<string>("IdentityUrl");
+            app.UseIdentityServerAuthentication(new IdentityServerAuthenticationOptions
+            {
+                Authority = identityUrl.ToString(),
+                ScopeName = "basket",
+                RequireHttpsMetadata = false
+            });
+        }
+
+        protected virtual void ConfigureEventBus(IApplicationBuilder app)
+        {
+            var catalogPriceHandler = app.ApplicationServices
+                .GetService<IIntegrationEventHandler<ProductPriceChangedIntegrationEvent>>();
+
+            var orderStartedHandler = app.ApplicationServices
+                .GetService<IIntegrationEventHandler<OrderStartedIntegrationEvent>>();
+
+            var eventBus = app.ApplicationServices.GetRequiredService<IEventBus>();
+
+            eventBus.Subscribe<ProductPriceChangedIntegrationEvent, ProductPriceChangedIntegrationEventHandler>
+                (() => app.ApplicationServices.GetRequiredService<ProductPriceChangedIntegrationEventHandler>());
+
+            eventBus.Subscribe<OrderStartedIntegrationEvent, OrderStartedIntegrationEventHandler>
+                (() => app.ApplicationServices.GetRequiredService<OrderStartedIntegrationEventHandler>());
         }
     }
 }
